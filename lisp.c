@@ -66,6 +66,7 @@ typedef enum {
     TK_FALSE,
     TK_EVAL,
     TK_FUNCTION,
+    TK_WHILE,
 
     // literals
     TK_INT,
@@ -213,6 +214,7 @@ TokenKind keyword_from_ident(const char *ident) {
     if (!strcmp("false", ident)) return TK_FALSE;
     if (!strcmp("eval", ident)) return TK_EVAL;
     if (!strcmp("function", ident)) return TK_FUNCTION;
+    if (!strcmp("while", ident)) return TK_WHILE;
     return TK_IDENT;
 }
 
@@ -419,6 +421,9 @@ const char *token_string(Token tok)
     case TK_EVAL:
         n += snprintf(sbuf + n, SBUF_LEN - n, " 'eval'");
         break;
+    case TK_WHILE:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " 'eval'");
+        break;
 
     case TK_INT:
         n += snprintf(sbuf + n, SBUF_LEN - n, " %d", tok.value.integer);
@@ -445,7 +450,21 @@ typedef enum {
     EK_IF,
     EK_DECLARE_VAR,
     EK_ASSIGN_VAR,
+    EK_WHILE,
+    __EK_LENGTH,
 } ExpressionKind;
+
+static const char *ek_names[] = {
+    [EK_ATOM] = "ATOM",
+    [EK_FUNCTION_CALL] = "FUNCTION_CALL",
+    [EK_FUNCTION_DEF] = "FUNCTION_DEF",
+    [EK_IF] = "IF",
+    [EK_DECLARE_VAR] = "DECLARE_VAR",
+    [EK_ASSIGN_VAR] = "ASSIGN_VAR",
+    [EK_WHILE] = "WHILE",
+};
+
+static_assert(sizeof(ek_names) / sizeof(*ek_names) == __EK_LENGTH, "Missing names for tokens");
 
 typedef struct {
     AST *items;
@@ -477,6 +496,11 @@ typedef struct {
 } IfValue;
 
 typedef struct {
+    AST *cond;
+    AST *body;
+} WhileValue;
+
+typedef struct {
     const char *name;
     AST *value; // optional for declare
 } DeclareAssign;
@@ -487,6 +511,7 @@ typedef struct {
     FunctionDefValue fn_def;
     IfValue if_;
     DeclareAssign declare_assign;
+    WhileValue while_;
 } ASTValue;
 
 typedef struct AST {
@@ -538,6 +563,7 @@ bool is_function_token(TokenKind kind) {
     case TK_FUNCTION:
     case TK_LET:
     case TK_EQUALS:
+    case TK_WHILE:
         return false;
     case TK_PLUS:
     case TK_MINUS:
@@ -689,6 +715,42 @@ AST parse_assign(FILE *file) {
     };
 }
 
+AST parse_while(FILE *file) {
+    if (take_token_if(file, TK_EOF, NULL)) {
+        ERROR("expected condition, got EOF");
+    }
+    if (take_token_if(file, TK_RPAREN, NULL)) {
+        ERROR("expected condition, got ')'");
+    }
+
+    AST cond = parse(file);
+    AST *condp = malloc(sizeof(AST));
+    *condp = cond;
+
+    if (take_token_if(file, TK_EOF, NULL)) {
+        ERROR("expected while body, got EOF");
+    }
+    if (take_token_if(file, TK_RPAREN, NULL)) {
+        ERROR("expected while body, got ')'");
+    }
+
+    AST body = parse(file);
+    AST *bodyp = malloc(sizeof(AST));
+    *bodyp = body;
+
+    expect_token(file, TK_RPAREN);
+
+    return (AST) {
+        .kind = EK_WHILE,
+        .value = {
+            .while_ = {
+                .cond = condp,
+                .body = bodyp,
+            }
+        }
+    };
+}
+
 AST parse_cons(FILE *file) {
     expect_token(file, TK_LPAREN);
 
@@ -698,6 +760,7 @@ AST parse_cons(FILE *file) {
     if (tok.kind == TK_FUNCTION) return parse_function_def(file);
     if (tok.kind == TK_LET) return parse_declare(file);
     if (tok.kind == TK_EQUALS) return parse_assign(file);
+    if (tok.kind == TK_WHILE) return parse_while(file);
 
     if (!is_function_token(tok.kind)) {
         ERROR("Expected function name, got %s", token_string(tok));
@@ -747,6 +810,7 @@ void print_ast(AST *ast, size_t depth) {
     int prefix = depth * 4;
     printf("%*s", prefix, "");
     switch (ast->kind) {
+        case __EK_LENGTH: PANIC("unreachable");
         case EK_ATOM:
             printf("Atom -> %s\n", token_string(ast->value.atom));
             break;
@@ -817,6 +881,19 @@ void print_ast(AST *ast, size_t depth) {
             printf("%*s", prefix + 4, "");
             printf("value:\n");
                 print_ast(dec.value, depth + 2);
+            printf("%*s}\n", prefix, "");
+        } break;
+        case EK_WHILE: {
+            WhileValue w = ast->value.while_;
+            printf("while {\n");
+
+            printf("%*s", prefix + 4, "");
+            printf("condition:\n");
+                print_ast(w.cond, depth + 2);
+
+            printf("%*s", prefix + 4, "");
+            printf("body:\n");
+                print_ast(w.body, depth + 2);
             printf("%*s}\n", prefix, "");
         } break;
     }
@@ -1108,6 +1185,7 @@ Value *get_var(EvalScope *scope, const char *name) {
 Value eval(AST ast, EvalScope *scope);
 Value eval_in_scope(AST ast, EvalScope *scope) {
     switch (ast.kind) {
+        case __EK_LENGTH: PANIC("unreachable");
         case EK_ATOM: {
             switch (ast.value.atom.kind) {
                 case TK_LPAREN:
@@ -1123,6 +1201,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 case TK_LET:
                 case TK_EQUALS:
                 case TK_AT:
+                case TK_WHILE:
                 case __TK_LENGTH:
                     PANIC("unreachable: %s", token_string(ast.value.atom));
                 case TK_INT:
@@ -1168,6 +1247,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 case TK_FUNCTION:
                 case TK_LET:
                 case TK_EQUALS:
+                case TK_WHILE:
                 case __TK_LENGTH:
                     PANIC("unreachable");
 
@@ -1272,6 +1352,16 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 } break;
             }
         } break;
+        case EK_WHILE: {
+            WhileValue w = ast.value.while_;
+            for (;;) {
+                Value cond = eval(*w.cond, scope);
+                if (!value_to_bool(cond)) break;
+                eval(*w.body, scope);
+            }
+
+            return (Value) { 0 };
+        } break;
         case EK_IF: {
             IfValue if_ = ast.value.if_;
             Value cond = eval(*if_.cond, scope);
@@ -1313,7 +1403,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
             return (Value) { 0 };
         } break;
     }
-    return (Value) { 0 };
+    PANIC("Unkonwn expression kind: '%s'", ek_names[ast.kind]);
 }
 
 Value eval(AST ast, EvalScope *parent_scope) {
