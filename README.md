@@ -40,10 +40,10 @@ keywords that were highlighted.
 ## Variables
 
 ```lisp
-(let x) ; declare variable x
+(let x)         ; declare variable x
 (let y (+ 2 3)) ; declare variable x and assign to it
-(= x (+ 3 10)) ; assign value to previously declared variable
-(= y 1) ; assign value to previously declared variable
+(= x (+ 3 10))  ; assign value to previously declared variable
+(= y 1)         ; assign value to previously declared variable
 ```
 
 ## User Functions
