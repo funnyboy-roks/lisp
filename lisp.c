@@ -648,7 +648,6 @@ AST parse_declare(FILE *file) {
         ERROR("Expected name for varaible declaration, got %s", token_string(*peek_token(file)));
     }
 
-    Token *peek = peek_token(file);
     AST *valuep;
     if (!take_token_if(file, TK_RPAREN, NULL)) {
         AST value = parse(file);
@@ -953,6 +952,7 @@ char *value_to_string(Value value) {
         case VK_UNIT:
             return "()";
     }
+    return NULL;
 }
 
 bool coerce(Value *value, ValueKind vk) {
@@ -967,16 +967,20 @@ bool coerce(Value *value, ValueKind vk) {
             value->value.integer = value_to_bool(*value);
             return true;
         case VK_UNIT: // TODO: make everything coerce into a unit?
+            return false;
+        case VK_ARRAY:
+            return false;
         case VK_INT:
             switch (value->kind) {
                 case VK_INT: return true;
                 case VK_BOOL: 
                     value->kind = vk;
                     return true;
-                case VK_UNIT:
                 case VK_STRING: // TODO: implicit parse int?
+                case VK_UNIT:
                 case VK_FUNCTION:
                 case VK_NATIVE_FUNCTION:
+                case VK_ARRAY:
                     return false;
                 case __VK_LENGTH: PANIC("unreachable");
             }
@@ -986,6 +990,7 @@ bool coerce(Value *value, ValueKind vk) {
         case __VK_LENGTH:
             PANIC("unreachable");
     }
+    return false;
 }
 
 void add_value(Value *curr, Value new) {
