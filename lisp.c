@@ -75,14 +75,39 @@ typedef enum {
 } TokenKind;
 
 typedef struct {
-    const char *data; 
-    size_t length;
-} StringSlice;
+    char *items; 
+    size_t count;
+    ssize_t capacity;
+} String;
+
+String new_string(char *cstr) {
+    return (String) {
+        .items = cstr,
+        .count = strlen(cstr),
+        .capacity = -1,
+    };
+}
+
+void resize_string(String *curr, size_t new_size) {
+    if (curr->count > new_size) return;
+    if (curr->capacity == -1) {
+        char *data = malloc(curr->capacity = new_size);
+        strcpy(data, curr->items);
+        curr->items = data;
+    } else if (curr->capacity < new_size) {
+        curr->items = realloc(curr->items, curr->capacity = new_size);
+    }
+}
+
+void extend_string(String *curr, String other) {
+    resize_string(curr, curr->count + other.count + 1);
+    strncpy(curr->items + curr->count, other.items, other.count);
+}
 
 typedef union {
     int integer;
     const char *ident;
-    StringSlice string;
+    String string;
 } TokenValue;
 
 typedef struct {
@@ -188,7 +213,7 @@ TokenKind keyword_from_ident(const char *ident) {
     return TK_IDENT;
 }
 
-StringSlice take_string(FILE *file, char quote) {
+String take_string(FILE *file, char quote) {
     char nc;
     size_t cap = 256;
     char *string = malloc(cap);
@@ -213,9 +238,9 @@ StringSlice take_string(FILE *file, char quote) {
     }
     string[len] = '\0';
 
-    return (StringSlice) {
-        .data = string,
-        .length = len,
+    return (String) {
+        .items = string,
+        .count = len,
     };
 }
 
@@ -278,7 +303,7 @@ Token next_token(FILE *file)
             } break;
             case '\'':
             case '"': {
-                StringSlice string = take_string(file, c);
+                String string = take_string(file, c);
                 return (Token) {
                     .kind = TK_STRING,
                     .value = {
@@ -404,7 +429,7 @@ const char *token_string(Token tok)
         n += snprintf(sbuf + n, SBUF_LEN - n, " '%s'", tok.value.ident);
         break;
     case TK_STRING:
-        n += snprintf(sbuf + n, SBUF_LEN - n, " '%s'", tok.value.string.data);
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '%s'", tok.value.string.items);
         break;
 
     case __TK_LENGTH:
@@ -824,13 +849,14 @@ typedef struct Value Value;
 typedef struct EvalScope EvalScope;
 
 typedef struct {
+    const char *name;
     size_t expected_args;
     Value (*fn)(EvalScope *scope, size_t argc, Value *argv);
 } NativeFunctionValue;
 
 typedef union {
     int integer;
-    StringSlice string;
+    String string;
     FunctionDefValue fn;
     NativeFunctionValue native;
 } ValueValue;
@@ -850,7 +876,7 @@ void free_value(Value *v) {
         case __VK_LENGTH:
             break;
         case VK_STRING:
-            free((void *)v->value.string.data);
+            free((void *)v->value.string.items);
         case VK_FUNCTION:
             // TODO: Fix double free when we have a function that has itself in one of the parameters:
             // (eval
@@ -862,129 +888,105 @@ void free_value(Value *v) {
     }
 }
 
-void add_value(Value *curr, Value new) {
-    switch (curr->kind) {
+bool value_to_bool(Value v) {
+    switch (v.kind) {
+    case VK_UNIT:
+        return false;
+    case VK_INT:
+    case VK_BOOL:
+        return v.value.integer != 0;
+    case VK_STRING:
+        return v.value.string.count != 0;
+    case VK_FUNCTION:
+    case VK_NATIVE_FUNCTION:
+        PANIC("Cannot convert function to BOOL");
+    case __VK_LENGTH: PANIC("unreachable");
+    }
+    PANIC("unreachable");
+}
+
+char *value_to_string(Value value) {
+    switch (value.kind) {
         case __VK_LENGTH: PANIC("unreachable");
-        case VK_NATIVE_FUNCTION:
-        case VK_FUNCTION:
-            PANIC("Cannot add %s to %s", vk_names[new.kind], vk_names[curr->kind]);
-            return;
-        case VK_BOOL: {
-            switch (new.kind) {
-            case __VK_LENGTH: PANIC("unreachable");
-            case VK_UNIT:
-            case VK_FUNCTION:
-            case VK_NATIVE_FUNCTION:
-                PANIC("Cannot add %s to %s", vk_names[new.kind], vk_names[curr->kind]);
-                return;
-            case VK_INT:
-            case VK_BOOL:
-                curr->value.integer += new.value.integer;
-                curr->kind = VK_INT;
-                return;
-            case VK_STRING: {
-                size_t new_length = (curr->value.integer ? 4 : 5) + new.value.string.length + 1;
-                char new_string[new_length];
-                new_length = snprintf(
-                    new_string, new_length,
-                    "%s%.*s",
-                    curr->value.integer ? "true" : "false",
-                    (int)new.value.string.length, new.value.string.data
-                );
-                curr->value.string.data = strdup(new_string);
-                curr->value.string.length = new_length;
-                curr->kind = VK_STRING;
-            } break;
-            }
-        } break;
         case VK_INT: {
-            switch (new.kind) {
-            case __VK_LENGTH: PANIC("unreachable");
-            case VK_UNIT:
-            case VK_FUNCTION:
-            case VK_NATIVE_FUNCTION:
-                PANIC("Cannot add %s to %s", vk_names[new.kind], vk_names[curr->kind]);
-                return;
-            case VK_INT:
-            case VK_BOOL:
-                curr->value.integer += new.value.integer;
-                curr->kind = VK_INT;
-                return;
-            case VK_STRING: {
-                size_t new_length = 20 + new.value.string.length;
-                char new_string[new_length];
-                new_length = snprintf(
-                    new_string, new_length,
-                    "%d%.*s",
-                    curr->value.integer,
-                    (int)new.value.string.length, new.value.string.data
-                );
-                curr->value.string.data = strdup(new_string);
-                curr->value.string.length = new_length;
-                curr->kind = VK_STRING;
-            } break;
-            }
-        } break;
-        case VK_STRING: {
-            switch (new.kind) {
-            case __VK_LENGTH: PANIC("unreachable");
-            case VK_UNIT:
-            case VK_FUNCTION:
-            case VK_NATIVE_FUNCTION:
-                PANIC("Cannot add %s to %s", vk_names[new.kind], vk_names[curr->kind]);
-                return;
-            case VK_BOOL: {
-                size_t new_length = curr->value.string.length + (new.value.integer ? 4 : 5) + 1;
-                char new_string[new_length];
-                new_length = snprintf(
-                    new_string, new_length,
-                    "%.*s%s",
-                    (int)curr->value.string.length, curr->value.string.data,
-                    new.value.integer ? "true" : "false"
-                );
-                free((void*)curr->value.string.data);
-                curr->value.string.data = strdup(new_string);
-                curr->value.string.length = new_length;
-                curr->kind = VK_STRING;
-            } break;
-            case VK_INT: {
-                size_t new_length = curr->value.string.length + 20;
-                char new_string[new_length];
-                new_length = snprintf(
-                    new_string, new_length,
-                    "%.*s%d",
-                    (int)curr->value.string.length, curr->value.string.data,
-                    new.value.integer
-                );
-                free((void*)curr->value.string.data);
-                curr->value.string.data = strdup(new_string);
-                curr->value.string.length = new_length;
-                curr->kind = VK_STRING;
-            } break;
-            case VK_STRING: {
-                size_t new_length = curr->value.string.length + new.value.string.length + 1;
-                char new_string[new_length];
-                new_length = snprintf(
-                    new_string, new_length,
-                    "%.*s%.*s",
-                    (int)curr->value.string.length, curr->value.string.data,
-                    (int)new.value.string.length, new.value.string.data
-                );
-                free((void*)curr->value.string.data);
-                curr->value.string.data = strdup(new_string);
-                curr->value.string.length = new_length;
-                curr->kind = VK_STRING;
-            } break;
-            }
-        } break;
-        case VK_UNIT:
-            *curr = new;
-            return;
+            char buf[20];
+            snprintf(buf, 20, "%d", value.value.integer);
+            return strdup(buf);
         }
+        case VK_STRING:
+            return value.value.string.items;
+        case VK_BOOL:
+            return value.value.integer ? "true" : "false";
+        case VK_FUNCTION: {
+            char buf[256];
+            snprintf(buf, 256, "<function '%s'>", value.value.fn.name);
+            return strdup(buf);
+        }
+        case VK_NATIVE_FUNCTION: {
+            char buf[256];
+            snprintf(buf, 256, "<native function '%s'>", value.value.native.name);
+            return strdup(buf);
+        }
+        case VK_UNIT:
+            return "()";
+    }
+}
+
+bool coerce(Value *value, ValueKind vk) {
+    if (value->kind == vk) return true;
+    switch (vk) {
+        case VK_STRING:
+            value->kind = vk;
+            value->value.string = new_string((char *)value_to_string(*value));
+            return true;
+        case VK_BOOL:
+            value->kind = vk;
+            value->value.integer = value_to_bool(*value);
+            return true;
+        case VK_UNIT: // TODO: make everything coerce into a unit?
+        case VK_INT:
+            switch (value->kind) {
+                case VK_INT: return true;
+                case VK_BOOL: 
+                    value->kind = vk;
+                    return true;
+                case VK_UNIT:
+                case VK_STRING: // TODO: implicit parse int?
+                case VK_FUNCTION:
+                case VK_NATIVE_FUNCTION:
+                    return false;
+                case __VK_LENGTH: PANIC("unreachable");
+            }
+        case VK_FUNCTION:
+        case VK_NATIVE_FUNCTION:
+            return false;
+        case __VK_LENGTH:
+            PANIC("unreachable");
+    }
+}
+
+void add_value(Value *curr, Value new) {
+    if (curr->kind == VK_UNIT) {
+        *curr = new;
+        return;
+    }
+
+    if (curr->kind == VK_STRING) {
+        String right = new_string(value_to_string(new));
+        extend_string(&curr->value.string, right);
+        return;
+    }
+
+    if (coerce(&new, curr->kind)) {
+        curr->value.integer += new.value.integer;
+        return;
+    }
+
+    PANIC("Cannot add %s to %s", vk_names[new.kind], vk_names[curr->kind]);
 }
 
 void sub_value(Value *curr, Value new) {
-    if (curr->kind != VK_INT || new.kind != VK_INT) PANIC("Cannot subtract %s from %s", vk_names[new.kind], vk_names[curr->kind]);
+    if (curr->kind != VK_INT || !coerce(&new, curr->kind)) PANIC("Cannot subtract %s from %s", vk_names[new.kind], vk_names[curr->kind]);
 
     curr->value.integer -= new.value.integer;
     curr->kind = VK_INT;
@@ -1004,53 +1006,12 @@ void div_value(Value *curr, Value new) {
     curr->kind = VK_INT;
 }
 
-bool is_value_truthy(Value v) {
-    switch (v.kind) {
-    case VK_UNIT:
-        return false;
-    case VK_INT:
-    case VK_BOOL:
-        return v.value.integer != 0;
-    case VK_STRING:
-        return v.value.string.length != 0;
-    case VK_FUNCTION:
-    case VK_NATIVE_FUNCTION:
-        PANIC("Cannot convert function to BOOL");
-    case __VK_LENGTH: PANIC("unreachable");
-    }
-    PANIC("unreachable");
-}
-
-void print_value(Value value) {
-    switch (value.kind) {
-        case __VK_LENGTH: PANIC("unreachable");
-        case VK_INT:
-            printf("%d", value.value.integer);
-            break;
-        case VK_STRING:
-            printf("%.*s", (int)value.value.string.length, value.value.string.data);
-            break;
-        case VK_BOOL:
-            printf("%s", value.value.integer ? "true" : "false");
-            break;
-        case VK_FUNCTION:
-            printf("<function '%s'>", value.value.fn.name);
-            break;
-        case VK_NATIVE_FUNCTION:
-            printf("<native function '%s'>", value.value.fn.name);
-            break;
-        case VK_UNIT:
-            printf("()");
-            break;
-    }
-}
-
 typedef struct {
     const char *key;
     Value value;
 } VariableMapEntry;
 
-// TODO: use hasmap here
+// TODO: use hashmap here
 typedef struct {
     VariableMapEntry *items;
     size_t count;
@@ -1272,7 +1233,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
         case EK_IF: {
             IfValue if_ = ast.value.if_;
             Value cond = eval(*if_.cond, scope);
-            if (is_value_truthy(cond)) {
+            if (value_to_bool(cond)) {
                 return eval(*if_.true_branch, scope);
             }
 
@@ -1323,7 +1284,7 @@ Value eval(AST ast, EvalScope *parent_scope) {
 Value native_print(EvalScope *scope, size_t argc, Value *argv) {
     for (size_t i = 0; i < argc; ++i) {
         if (i != 0) printf(" ");
-        print_value(argv[i]);
+        printf("%s", value_to_string(argv[i]));
     }
     return (Value) { 0 };
 }
@@ -1341,7 +1302,7 @@ Value native_parseint(EvalScope *scope, size_t argc, Value *argv) {
         PANIC("parseint accepts one string as its argument, found %s.", vk_names[arg.kind]);
     }
 
-    int value = atoi(arg.value.string.data);
+    int value = atoi(arg.value.string.items);
     return (Value) {
         .kind = VK_INT,
         .value = {
@@ -1361,22 +1322,24 @@ Value native_readline(EvalScope *scope, size_t argc, Value *_argv) {
         .kind = VK_STRING,
         .value = {
             .string = {
-                .data = line,
-                .length = r,
+                .items = line,
+                .count = r,
             }
         }
     };
 }
 
-#define ADD_FN(name, native_fn, argc)  \
-    set_var(&scope, #name, (Value) {    \
+#define ADD_FN(fn_name, native_fn, argc)  \
+    set_var(&scope, #fn_name, (Value) {    \
         .kind = VK_NATIVE_FUNCTION,    \
         .value = {                     \
             .native = {                \
+                .name = #fn_name,         \
                 .expected_args = argc, \
                 .fn = native_fn,       \
             }                          \
         },                             \
+        .immutable = true              \
     });                                \
 
 EvalScope create_global_scope() {
