@@ -14,11 +14,11 @@
 } while (0);
 
 #ifdef DEBUG
-#define ERROR(...) do {                                                                       \
+#define ERROR(...) do {                                                                        \
     fprintf(stderr, "[ERROR] (%s:%d) %s:%ld:%ld: ", __FILE__, __LINE__, file_name, col, line); \
-    fprintf(stderr, __VA_ARGS__);                                                             \
-    fprintf(stderr, "\n");                                                                    \
-    exit(1);                                                                                  \
+    fprintf(stderr, __VA_ARGS__);                                                              \
+    fprintf(stderr, "\n");                                                                     \
+    exit(1);                                                                                   \
 } while (0);
 #else // DEBUG
 #define ERROR(...) do {                                            \
@@ -67,6 +67,7 @@ typedef enum {
     TK_EVAL,
     TK_FUNCTION,
     TK_WHILE,
+    TK_FOR,
 
     // literals
     TK_INT,
@@ -215,6 +216,7 @@ TokenKind keyword_from_ident(const char *ident) {
     if (!strcmp("eval", ident)) return TK_EVAL;
     if (!strcmp("function", ident)) return TK_FUNCTION;
     if (!strcmp("while", ident)) return TK_WHILE;
+    if (!strcmp("for", ident)) return TK_FOR;
     return TK_IDENT;
 }
 
@@ -361,6 +363,8 @@ const char *tk_names[] = {
     [TK_FALSE] = "FALSE",
     [TK_EVAL] = "EVAL",
     [TK_FUNCTION] = "FUNCTION",
+    [TK_WHILE] = "WHILE",
+    [TK_FOR] = "FOR",
 
     [TK_INT] = "INT",
     [TK_IDENT] = "IDENT",
@@ -422,7 +426,10 @@ const char *token_string(Token tok)
         n += snprintf(sbuf + n, SBUF_LEN - n, " 'eval'");
         break;
     case TK_WHILE:
-        n += snprintf(sbuf + n, SBUF_LEN - n, " 'eval'");
+        n += snprintf(sbuf + n, SBUF_LEN - n, " 'while'");
+        break;
+    case TK_FOR:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " 'for'");
         break;
 
     case TK_INT:
@@ -445,12 +452,14 @@ typedef struct AST AST;
 
 typedef enum {
     EK_ATOM = 0,
+    EK_UNIT,
     EK_FUNCTION_CALL,
     EK_FUNCTION_DEF,
     EK_IF,
     EK_DECLARE_VAR,
     EK_ASSIGN_VAR,
     EK_WHILE,
+    EK_FOR,
     __EK_LENGTH,
 } ExpressionKind;
 
@@ -462,6 +471,7 @@ static const char *ek_names[] = {
     [EK_DECLARE_VAR] = "DECLARE_VAR",
     [EK_ASSIGN_VAR] = "ASSIGN_VAR",
     [EK_WHILE] = "WHILE",
+    [EK_FOR] = "FOR",
 };
 
 static_assert(sizeof(ek_names) / sizeof(*ek_names) == __EK_LENGTH, "Missing names for tokens");
@@ -501,6 +511,13 @@ typedef struct {
 } WhileValue;
 
 typedef struct {
+    AST *init;
+    AST *cond;
+    AST *post;
+    AST *body;
+} ForValue;
+
+typedef struct {
     const char *name;
     AST *value; // optional for declare
 } DeclareAssign;
@@ -512,6 +529,7 @@ typedef struct {
     IfValue if_;
     DeclareAssign declare_assign;
     WhileValue while_;
+    ForValue for_;
 } ASTValue;
 
 typedef struct AST {
@@ -538,7 +556,7 @@ Token *peek_token(FILE *file) {
 
 Token expect_token(FILE *file, TokenKind kind) {
     Token tok = take_token(file);
-    if (tok.kind != kind) ERROR("Expocted token %s, found %s.", tk_names[kind], tk_names[tok.kind]);
+    if (tok.kind != kind) ERROR("Expected token %s, found %s.", tk_names[kind], tk_names[tok.kind]);
     return tok;
 }
 
@@ -564,6 +582,7 @@ bool is_function_token(TokenKind kind) {
     case TK_LET:
     case TK_EQUALS:
     case TK_WHILE:
+    case TK_FOR:
         return false;
     case TK_PLUS:
     case TK_MINUS:
@@ -579,28 +598,14 @@ bool is_function_token(TokenKind kind) {
     PANIC("unreachable");
 }
 
-AST parse(FILE *file);
+AST parse(FILE *file, const char *expected);
 
 AST parse_cond(FILE *file) {
-    if (take_token_if(file, TK_EOF, NULL)) {
-        ERROR("expected condition, got EOF");
-    }
-    if (take_token_if(file, TK_RPAREN, NULL)) {
-        ERROR("expected condition, got ')'");
-    }
-
-    AST cond = parse(file);
+    AST cond = parse(file, "condition");
     AST *condp = malloc(sizeof(AST));
     *condp = cond;
 
-    if (take_token_if(file, TK_EOF, NULL)) {
-        ERROR("expected expression, got EOF");
-    }
-    if (take_token_if(file, TK_RPAREN, NULL)) {
-        ERROR("expected expression, got ')'");
-    }
-
-    AST true_branch = parse(file);
+    AST true_branch = parse(file, "IF true branch");
     AST *true_branchp = malloc(sizeof(AST));
     *true_branchp = true_branch;
 
@@ -609,7 +614,7 @@ AST parse_cond(FILE *file) {
     }
     AST *false_branchp = NULL;
     if (!take_token_if(file, TK_RPAREN, NULL)) {
-        AST false_branch = parse(file);
+        AST false_branch = parse(file, "IF false branch");
         false_branchp = malloc(sizeof(AST));
         *false_branchp = false_branch;
 
@@ -646,11 +651,7 @@ AST parse_function_def(FILE *file) {
     }
 
     Token *peek = peek_token(file);
-    if (peek->kind != TK_LPAREN) {
-        ERROR("Expected function body, got %s", token_string(*peek));
-    }
-
-    AST body = parse(file);
+    AST body = parse(file, "function body");
     AST *bodyp = malloc(sizeof(AST));
     *bodyp = body;
 
@@ -676,7 +677,7 @@ AST parse_declare(FILE *file) {
 
     AST *valuep;
     if (!take_token_if(file, TK_RPAREN, NULL)) {
-        AST value = parse(file);
+        AST value = parse(file, "variable value");
         valuep = malloc(sizeof(AST));
         *valuep = value;
         expect_token(file, TK_RPAREN);
@@ -699,7 +700,7 @@ AST parse_assign(FILE *file) {
         ERROR("Expected name for varaible declaration, got %s", token_string(*peek_token(file)));
     }
 
-    AST value = parse(file);
+    AST value = parse(file, "variable value");
     AST *valuep = malloc(sizeof(AST));
     *valuep = value;
     expect_token(file, TK_RPAREN);
@@ -716,25 +717,11 @@ AST parse_assign(FILE *file) {
 }
 
 AST parse_while(FILE *file) {
-    if (take_token_if(file, TK_EOF, NULL)) {
-        ERROR("expected condition, got EOF");
-    }
-    if (take_token_if(file, TK_RPAREN, NULL)) {
-        ERROR("expected condition, got ')'");
-    }
-
-    AST cond = parse(file);
+    AST cond = parse(file, "while condition");
     AST *condp = malloc(sizeof(AST));
     *condp = cond;
 
-    if (take_token_if(file, TK_EOF, NULL)) {
-        ERROR("expected while body, got EOF");
-    }
-    if (take_token_if(file, TK_RPAREN, NULL)) {
-        ERROR("expected while body, got ')'");
-    }
-
-    AST body = parse(file);
+    AST body = parse(file, "while body");
     AST *bodyp = malloc(sizeof(AST));
     *bodyp = body;
 
@@ -751,8 +738,46 @@ AST parse_while(FILE *file) {
     };
 }
 
+AST parse_for(FILE *file) {
+    AST init = parse(file, "FOR init");
+    AST *initp = malloc(sizeof(AST));
+    *initp = init;
+
+    AST cond = parse(file, "FOR condition");
+    AST *condp = malloc(sizeof(AST));
+    *condp = cond;
+
+    AST post = parse(file, "FOR post");
+    AST *postp = malloc(sizeof(AST));
+    *postp = post;
+
+    AST body = parse(file, "FOR body");
+    AST *bodyp = malloc(sizeof(AST));
+    *bodyp = body;
+
+    expect_token(file, TK_RPAREN);
+
+    return (AST) {
+        .kind = EK_FOR,
+        .value = {
+            .for_ = {
+                .init = initp,
+                .cond = condp,
+                .post = postp,
+                .body = bodyp,
+            }
+        }
+    };
+}
+
 AST parse_cons(FILE *file) {
     expect_token(file, TK_LPAREN);
+
+    if(take_token_if(file, TK_RPAREN, NULL)) {
+        return (AST) {
+            .kind = EK_UNIT,
+        };
+    }
 
     Token tok = take_token(file);
 
@@ -761,6 +786,7 @@ AST parse_cons(FILE *file) {
     if (tok.kind == TK_LET) return parse_declare(file);
     if (tok.kind == TK_EQUALS) return parse_assign(file);
     if (tok.kind == TK_WHILE) return parse_while(file);
+    if (tok.kind == TK_FOR) return parse_for(file);
 
     if (!is_function_token(tok.kind)) {
         ERROR("Expected function name, got %s", token_string(tok));
@@ -776,7 +802,7 @@ AST parse_cons(FILE *file) {
             ERROR("expected ')' or value, got EOF");
         }
 
-        AST expr = parse(file);
+        AST expr = parse(file, "function argument");
         da_append(&args, expr);
     }
 
@@ -791,8 +817,40 @@ AST parse_cons(FILE *file) {
     };
 }
 
-AST parse(FILE *file) {
+bool is_expression_start(TokenKind tk) {
+    switch (tk) {
+        case TK_LPAREN:
+        case TK_INT:
+        case TK_IDENT:
+        case TK_STRING:
+        case TK_TRUE:
+        case TK_FALSE:
+            return true;
+
+        case TK_EOF:
+        case TK_RPAREN:
+        case TK_PLUS:
+        case TK_MINUS:
+        case TK_STAR:
+        case TK_SLASH:
+        case TK_EQUALS:
+        case TK_AT:
+        case TK_LET:
+        case TK_IF:
+        case TK_EVAL:
+        case TK_FUNCTION:
+        case TK_WHILE:
+        case TK_FOR:
+        case __TK_LENGTH:
+            return false;
+    }
+}
+
+AST parse(FILE *file, const char *expected) {
     Token *tok = peek_token(file);
+    if (!is_expression_start(tok->kind)) {
+        ERROR("expected %s, got %s", expected ? expected : "expression", tk_names[tok->kind]);
+    }
     switch (tok->kind) {
         case TK_LPAREN:
             return parse_cons(file);
@@ -813,6 +871,9 @@ void print_ast(AST *ast, size_t depth) {
         case __EK_LENGTH: PANIC("unreachable");
         case EK_ATOM:
             printf("Atom -> %s\n", token_string(ast->value.atom));
+            break;
+        case EK_UNIT:
+            printf("UNIT\n");
             break;
         case EK_IF:
             printf("if {\n");
@@ -896,6 +957,28 @@ void print_ast(AST *ast, size_t depth) {
                 print_ast(w.body, depth + 2);
             printf("%*s}\n", prefix, "");
         } break;
+        case EK_FOR: {
+            ForValue f = ast->value.for_;
+            printf("for {\n");
+
+            printf("%*s", prefix + 4, "");
+            printf("init:\n");
+                print_ast(f.init, depth + 2);
+
+            printf("%*s", prefix + 4, "");
+            printf("condition:\n");
+                print_ast(f.cond, depth + 2);
+
+            printf("%*s", prefix + 4, "");
+            printf("post:\n");
+                print_ast(f.post, depth + 2);
+
+            printf("%*s", prefix + 4, "");
+            printf("body:\n");
+                print_ast(f.body, depth + 2);
+
+            printf("%*s}\n", prefix, "");
+        } break;
     }
 }
 
@@ -923,12 +1006,12 @@ const char *vk_names[] = {
 static_assert(sizeof(vk_names) / sizeof(*vk_names) == __VK_LENGTH, "");
 
 typedef struct Value Value;
-typedef struct EvalScope EvalScope;
+typedef struct EvalContext EvalContext;
 
 typedef struct {
     const char *name;
     size_t expected_args;
-    Value (*fn)(EvalScope *scope, size_t argc, Value *argv);
+    Value (*fn)(EvalContext *ctx, size_t argc, Value *argv);
 } NativeFunctionValue;
 
 typedef struct {
@@ -1123,29 +1206,29 @@ typedef struct {
     size_t capacity;
 } VariableMap;
 
-typedef struct EvalScope {
+typedef struct EvalContext {
     VariableMap vars;
-    EvalScope *parent;
-} EvalScope;
+    EvalContext *parent;
+} EvalContext;
 
-EvalScope create_scope(EvalScope *parent) {
-    return (EvalScope) {
+EvalContext create_ctx(EvalContext *parent) {
+    return (EvalContext) {
         .vars = { 0 },
         .parent = parent,
     };
 }
 
-void free_scope(EvalScope scope) {
-    for (size_t i = 0; i < scope.vars.count; ++i) {
-        free_value(&scope.vars.items[i].value);
+void free_ctx(EvalContext ctx) {
+    for (size_t i = 0; i < ctx.vars.count; ++i) {
+        free_value(&ctx.vars.items[i].value);
     }
-    free(scope.vars.items);
+    free(ctx.vars.items);
 }
 
-// adds a var to the scope with the value of UNIT.
-Value *add_var(EvalScope *scope, const char *name) {
-    for (size_t i = 0; i < scope->vars.count; ++i) {
-        VariableMapEntry entry = scope->vars.items[i];
+// adds a var to the ctx with the value of UNIT.
+Value *add_var(EvalContext *ctx, const char *name) {
+    for (size_t i = 0; i < ctx->vars.count; ++i) {
+        VariableMapEntry entry = ctx->vars.items[i];
         if (!strcmp(entry.key, name)) PANIC("Variable '%s' already declared.", name);
     }
     Value v = { 0 };
@@ -1153,13 +1236,13 @@ Value *add_var(EvalScope *scope, const char *name) {
         .key = name,
         .value = v,
     };
-    da_append(&scope->vars, entry);
-    return &scope->vars.items[scope->vars.count - 1].value;
+    da_append(&ctx->vars, entry);
+    return &ctx->vars.items[ctx->vars.count - 1].value;
 }
 
-void set_var(EvalScope *scope, const char *name, Value v) {
-    for (size_t i = 0; i < scope->vars.count; ++i) {
-        VariableMapEntry *entry = &scope->vars.items[i];
+void set_var(EvalContext *ctx, const char *name, Value v) {
+    for (size_t i = 0; i < ctx->vars.count; ++i) {
+        VariableMapEntry *entry = &ctx->vars.items[i];
         if (!strcmp(entry->key, name)) {
             entry->value = v;
             return;
@@ -1169,21 +1252,21 @@ void set_var(EvalScope *scope, const char *name, Value v) {
         .key = name,
         .value = v,
     };
-    da_append(&scope->vars, entry);
+    da_append(&ctx->vars, entry);
 }
 
-Value *get_var(EvalScope *scope, const char *name) {
-    for (size_t i = 0; i < scope->vars.count; ++i) {
-        VariableMapEntry entry = scope->vars.items[i];
+Value *get_var(EvalContext *ctx, const char *name) {
+    for (size_t i = 0; i < ctx->vars.count; ++i) {
+        VariableMapEntry entry = ctx->vars.items[i];
         if (!strcmp(entry.key, name))
-            return &scope->vars.items[i].value;
+            return &ctx->vars.items[i].value;
     }
-    if (scope->parent == NULL) return NULL;
-    return get_var(scope->parent, name);
+    if (ctx->parent == NULL) return NULL;
+    return get_var(ctx->parent, name);
 }
 
-Value eval(AST ast, EvalScope *scope);
-Value eval_in_scope(AST ast, EvalScope *scope) {
+Value eval(AST ast, EvalContext *ctx);
+Value eval_in_ctx(AST ast, EvalContext *ctx) {
     switch (ast.kind) {
         case __EK_LENGTH: PANIC("unreachable");
         case EK_ATOM: {
@@ -1202,6 +1285,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 case TK_EQUALS:
                 case TK_AT:
                 case TK_WHILE:
+                case TK_FOR:
                 case __TK_LENGTH:
                     PANIC("unreachable: %s", token_string(ast.value.atom));
                 case TK_INT:
@@ -1212,8 +1296,8 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                         }
                     };
                 case TK_IDENT: {
-                    Value *var = get_var(scope, ast.value.atom.value.ident);
-                    if (!var) PANIC("Variable '%s' does not exist in current scope.", ast.value.atom.value.ident);
+                    Value *var = get_var(ctx, ast.value.atom.value.ident);
+                    if (!var) PANIC("Variable '%s' does not exist in current ctx.", ast.value.atom.value.ident);
                     return *var;
                 } break;
                 case TK_TRUE:
@@ -1234,6 +1318,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                     };
             }
         } break;
+        case EK_UNIT: return (Value) { 0 };
         case EK_FUNCTION_CALL: {
             switch(ast.value.fn_call.op.kind) {
                 case TK_EOF:
@@ -1248,6 +1333,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 case TK_LET:
                 case TK_EQUALS:
                 case TK_WHILE:
+                case TK_FOR:
                 case __TK_LENGTH:
                     PANIC("unreachable");
 
@@ -1260,7 +1346,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                         },
                     };
                     for (size_t i = 0; i < fn.args.count; ++i) {
-                        da_append(&ret.value.array, eval(fn.args.items[i], scope));
+                        da_append(&ret.value.array, eval(fn.args.items[i], ctx));
                     }
                     return ret;
                 } break;
@@ -1269,7 +1355,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                     if (fn.args.count < 1) PANIC("Eval operation must have at least on expression");
                     Value ret = { 0 };
                     for (size_t i = 0; i < fn.args.count; ++i) {
-                        ret = eval(fn.args.items[i], scope);
+                        ret = eval(fn.args.items[i], ctx);
                     }
                     return ret;
                 } break;
@@ -1278,16 +1364,16 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                     if (fn.args.count < 1) PANIC("Add operation must contain at least one value.");
                     Value out = { 0 };
                     for (size_t i = 0; i < fn.args.count; ++i) {
-                        add_value(&out, eval(fn.args.items[i], scope));
+                        add_value(&out, eval(fn.args.items[i], ctx));
                     }
                     return out;
                 } break;
                 case TK_MINUS: {
                     FunctionCallValue fn = ast.value.fn_call;
                     if (fn.args.count < 2) PANIC("Subtract operation must contain at least two values.");
-                    Value out = eval(fn.args.items[0], scope);
+                    Value out = eval(fn.args.items[0], ctx);
                     for (size_t i = 1; i < fn.args.count; ++i) {
-                        sub_value(&out, eval(fn.args.items[i], scope));
+                        sub_value(&out, eval(fn.args.items[i], ctx));
                     }
                     return out;
                 } break;
@@ -1301,23 +1387,23 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                         },
                     };
                     for (size_t i = 0; i < fn.args.count; ++i) {
-                        mult_value(&out, eval(fn.args.items[i], scope));
+                        mult_value(&out, eval(fn.args.items[i], ctx));
                     }
                     return out;
                 } break;
                 case TK_SLASH: {
                     FunctionCallValue fn = ast.value.fn_call;
                     if (fn.args.count < 2) PANIC("Subtract operation must contain at least two values.");
-                    Value out = eval(fn.args.items[0], scope);
+                    Value out = eval(fn.args.items[0], ctx);
                     for (size_t i = 1; i < fn.args.count; ++i) {
-                        div_value(&out, eval(fn.args.items[i], scope));
+                        div_value(&out, eval(fn.args.items[i], ctx));
                     }
                     return out;
                 } break;
                 case TK_IDENT: {
                     FunctionCallValue fn = ast.value.fn_call;
                     const char *name = fn.op.value.ident;
-                    Value *var = get_var(scope, name);
+                    Value *var = get_var(ctx, name);
                     if (var == NULL) {
                         PANIC("Unknown function '%s'", name);
                     } else if (var->kind == VK_FUNCTION) {
@@ -1326,13 +1412,13 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                         if (fn.args.count != fndef.params.count)
                             PANIC("Function '%s' expected %ld params, received %ld.", name, fndef.params.count, fn.args.count);
                         
-                        EvalScope fn_scope = create_scope(scope);
+                        EvalContext fn_ctx = create_ctx(ctx);
                         for (size_t i = 0; i < fndef.params.count; ++i) {
-                            Value *v = add_var(&fn_scope, fndef.params.items[i]);
-                            *v = eval(fn.args.items[i], scope);
+                            Value *v = add_var(&fn_ctx, fndef.params.items[i]);
+                            *v = eval(fn.args.items[i], ctx);
                         }
-                        eval_in_scope(*fndef.body, &fn_scope);
-                        free_scope(fn_scope);
+                        eval_in_ctx(*fndef.body, &fn_ctx);
+                        free_ctx(fn_ctx);
                     } else if (var->kind == VK_NATIVE_FUNCTION) {
                         NativeFunctionValue fndef = var->value.native;
 
@@ -1342,78 +1428,93 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                         Value argv[fn.args.count];
 
                         for (size_t i = 0; i < fn.args.count; ++i) {
-                            argv[i] = eval(fn.args.items[i], scope);
+                            argv[i] = eval(fn.args.items[i], ctx);
                         }
 
-                        return fndef.fn(scope, fn.args.count, argv);
+                        return fndef.fn(ctx, fn.args.count, argv);
                     } else {
                         PANIC("Variable '%s' is not a function.", name);
                     }
                 } break;
             }
         } break;
+        case EK_FOR: {
+            ForValue f = ast.value.for_;
+            eval(*f.init, ctx);
+            for (;;) {
+                // if condition is (), then we pretend it's `true`, like C does.
+                if (f.cond->kind != EK_UNIT) {
+                    Value cond = eval(*f.cond, ctx);
+                    if (!value_to_bool(cond)) break;
+                }
+                eval(*f.body, ctx);
+                eval(*f.post, ctx);
+            }
+
+            return (Value) { 0 };
+        } break;
         case EK_WHILE: {
             WhileValue w = ast.value.while_;
             for (;;) {
-                Value cond = eval(*w.cond, scope);
+                Value cond = eval(*w.cond, ctx);
                 if (!value_to_bool(cond)) break;
-                eval(*w.body, scope);
+                eval(*w.body, ctx);
             }
 
             return (Value) { 0 };
         } break;
         case EK_IF: {
             IfValue if_ = ast.value.if_;
-            Value cond = eval(*if_.cond, scope);
+            Value cond = eval(*if_.cond, ctx);
             if (value_to_bool(cond)) {
-                return eval(*if_.true_branch, scope);
+                return eval(*if_.true_branch, ctx);
             }
 
             if (if_.false_branch) {
-                return eval(*if_.false_branch, scope);
+                return eval(*if_.false_branch, ctx);
             }
 
             return (Value) { 0 };
         } break;
         case EK_FUNCTION_DEF: {
             FunctionDefValue fn = ast.value.fn_def;
-            Value *var = add_var(scope->parent, fn.name);
+            Value *var = add_var(ctx->parent, fn.name);
             var->kind = VK_FUNCTION;
             var->value.fn = fn;
             return (Value) { 0 };
         } break;
         case EK_DECLARE_VAR: {
             DeclareAssign dec = ast.value.declare_assign;
-            Value *var = add_var(scope->parent, dec.name);
+            Value *var = add_var(ctx->parent, dec.name);
             if (dec.value) {
-                *var = eval(*dec.value, scope);
+                *var = eval(*dec.value, ctx);
             }
             return (Value) { 0 };
         } break;
         case EK_ASSIGN_VAR: {
             DeclareAssign ass = ast.value.declare_assign;
-            Value *var = get_var(scope->parent, ass.name);
+            Value *var = get_var(ctx->parent, ass.name);
             if (var == NULL) {
-                PANIC("Variable '%s' does not exist in scope.", ass.name);
+                PANIC("Variable '%s' does not exist in ctx.", ass.name);
             }
             if (var->immutable) {
                 PANIC("Variable '%s' is immutable.", ass.name);
             }
-            *var = eval(*ass.value, scope);
+            *var = eval(*ass.value, ctx);
             return (Value) { 0 };
         } break;
     }
     PANIC("Unkonwn expression kind: '%s'", ek_names[ast.kind]);
 }
 
-Value eval(AST ast, EvalScope *parent_scope) {
-    EvalScope scope = create_scope(parent_scope);
-    Value ret = eval_in_scope(ast, &scope);
-    free_scope(scope);
+Value eval(AST ast, EvalContext *parent_ctx) {
+    EvalContext ctx = create_ctx(parent_ctx);
+    Value ret = eval_in_ctx(ast, &ctx);
+    free_ctx(ctx);
     return ret;
 }
 
-Value native_print(EvalScope *scope, size_t argc, Value *argv) {
+Value native_print(EvalContext *ctx, size_t argc, Value *argv) {
     for (size_t i = 0; i < argc; ++i) {
         if (i != 0) printf(" ");
         printf("%s", value_to_string(argv[i]));
@@ -1421,13 +1522,13 @@ Value native_print(EvalScope *scope, size_t argc, Value *argv) {
     return (Value) { 0 };
 }
 
-Value native_println(EvalScope *scope, size_t argc, Value *argv) {
-    Value ret = native_print(scope, argc, argv);
+Value native_println(EvalContext *ctx, size_t argc, Value *argv) {
+    Value ret = native_print(ctx, argc, argv);
     printf("\n");
     return ret;
 }
 
-Value native_parseint(EvalScope *scope, size_t argc, Value *argv) {
+Value native_parseint(EvalContext *ctx, size_t argc, Value *argv) {
     assert(argc == 1);
     Value arg = argv[0];
     if (arg.kind != VK_STRING) {
@@ -1443,7 +1544,7 @@ Value native_parseint(EvalScope *scope, size_t argc, Value *argv) {
     };
 }
 
-Value native_readline(EvalScope *scope, size_t argc, Value *_argv) {
+Value native_readline(EvalContext *ctx, size_t argc, Value *_argv) {
     assert(argc == 0);
     char *line = NULL;
     size_t n = 0;
@@ -1461,26 +1562,26 @@ Value native_readline(EvalScope *scope, size_t argc, Value *_argv) {
     };
 }
 
-#define ADD_FN(fn_name, native_fn, argc)  \
-    set_var(&scope, #fn_name, (Value) {    \
-        .kind = VK_NATIVE_FUNCTION,    \
-        .value = {                     \
-            .native = {                \
-                .name = #fn_name,         \
-                .expected_args = argc, \
-                .fn = native_fn,       \
-            }                          \
-        },                             \
-        .immutable = true              \
-    });                                \
+#define ADD_FN(fn_name, native_fn, argc) \
+    set_var(&ctx, #fn_name, (Value) {  \
+        .kind = VK_NATIVE_FUNCTION,      \
+        .value = {                       \
+            .native = {                  \
+                .name = #fn_name,        \
+                .expected_args = argc,   \
+                .fn = native_fn,         \
+            }                            \
+        },                               \
+        .immutable = true                \
+    });                                  \
 
-EvalScope create_global_scope() {
-    EvalScope scope = create_scope(NULL);
+EvalContext create_global_ctx() {
+    EvalContext ctx = create_ctx(NULL);
     ADD_FN(print, native_print, -1);
     ADD_FN(println, native_println, -1);
     ADD_FN(parseint, native_parseint, 1);
     ADD_FN(readline, native_readline, 0);
-    return scope;
+    return ctx;
 }
 
 int main(int argc, char **argv)
@@ -1498,7 +1599,7 @@ int main(int argc, char **argv)
     // while ((tok = next_token(file)).kind != TK_EOF) {
     //     printf("%s\n", token_string(tok));
     // }
-    AST ast = parse(file);
+    AST ast = parse(file, "expression");
     Token tok = take_token(file);
     if (tok.kind != TK_EOF) {
         ERROR("Expected EOF, found %s", token_string(tok));
@@ -1506,6 +1607,6 @@ int main(int argc, char **argv)
     fclose(file);
     print_ast(&ast, 0);
 
-    EvalScope global_scope = create_global_scope();
-    eval(ast, &global_scope);
+    EvalContext global_ctx = create_global_ctx();
+    eval(ast, &global_ctx);
 }
