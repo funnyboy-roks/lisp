@@ -57,6 +57,7 @@ typedef enum {
     TK_STAR,
     TK_SLASH,
     TK_EQUALS,
+    TK_AT,
 
     // keywords
     TK_LET,
@@ -102,6 +103,8 @@ void resize_string(String *curr, size_t new_size) {
 void extend_string(String *curr, String other) {
     resize_string(curr, curr->count + other.count + 1);
     strncpy(curr->items + curr->count, other.items, other.count);
+    curr->count += other.count;
+    curr->items[curr->count] = '\0';
 }
 
 typedef union {
@@ -255,36 +258,27 @@ Token next_token(FILE *file)
         }
 
         switch (c) {
-            case '(': {
-                return (Token) {
-                    .kind = TK_LPAREN,
-                };
-            } break;
-            case ')': {
-                return (Token) {
-                    .kind = TK_RPAREN,
-                };
-            } break;
-            case '+': {
-                return (Token) {
-                    .kind = TK_PLUS,
-                };
-            } break;
-            case '*': {
-                return (Token) {
-                    .kind = TK_STAR,
-                };
-            } break;
-            case '=': {
-                return (Token) {
-                    .kind = TK_EQUALS,
-                };
-            } break;
-            case '/': {
-                return (Token) {
-                    .kind = TK_SLASH,
-                };
-            } break;
+            case '(': return (Token) {
+                .kind = TK_LPAREN,
+            };
+            case ')': return (Token) {
+                .kind = TK_RPAREN,
+            };
+            case '+': return (Token) {
+                .kind = TK_PLUS,
+            };
+            case '*': return (Token) {
+                .kind = TK_STAR,
+            };
+            case '=': return (Token) {
+                .kind = TK_EQUALS,
+            };
+            case '/': return (Token) {
+                .kind = TK_SLASH,
+            };
+            case '@': return (Token) {
+                .kind = TK_AT,
+            };
             case '-': {
                 int nc = fpeek(file);
                 if (nc != EOF && isdigit(nc)) {
@@ -357,6 +351,7 @@ const char *tk_names[] = {
     [TK_STAR] = "STAR",
     [TK_SLASH] = "SLASH",
     [TK_EQUALS] = "EQUALS",
+    [TK_AT] = "AT",
 
     [TK_LET] = "LET",
     [TK_IF] = "IF",
@@ -401,6 +396,9 @@ const char *token_string(Token tok)
         break;
     case TK_EQUALS:
         n += snprintf(sbuf + n, SBUF_LEN - n, " '='");
+        break;
+    case TK_AT:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '@'");
         break;
 
     case TK_LET:
@@ -547,6 +545,7 @@ bool is_function_token(TokenKind kind) {
     case TK_SLASH:
     case TK_IDENT:
     case TK_EVAL:
+    case TK_AT:
         return true;
     case __TK_LENGTH:
         PANIC("unreachable");
@@ -831,6 +830,7 @@ typedef enum {
     VK_BOOL,
     VK_FUNCTION,
     VK_NATIVE_FUNCTION,
+    VK_ARRAY,
     __VK_LENGTH,
 } ValueKind;
 
@@ -841,6 +841,7 @@ const char *vk_names[] = {
     [VK_BOOL] = "BOOL",
     [VK_FUNCTION] = "FUNCTION",
     [VK_NATIVE_FUNCTION] = "NATIVE_FUNCTION",
+    [VK_ARRAY] = "ARRAY",
 };
 
 static_assert(sizeof(vk_names) / sizeof(*vk_names) == __VK_LENGTH, "");
@@ -854,11 +855,18 @@ typedef struct {
     Value (*fn)(EvalScope *scope, size_t argc, Value *argv);
 } NativeFunctionValue;
 
+typedef struct {
+    Value *items;
+    size_t count;
+    size_t capacity;
+} ValueArray;
+
 typedef union {
     int integer;
     String string;
     FunctionDefValue fn;
     NativeFunctionValue native;
+    ValueArray array;
 } ValueValue;
 
 typedef struct Value {
@@ -877,6 +885,11 @@ void free_value(Value *v) {
             break;
         case VK_STRING:
             free((void *)v->value.string.items);
+        case VK_ARRAY:
+            for (size_t i = 0; i < v->value.array.count; ++i) {
+                free_value(&v->value.array.items[i]);
+            }
+            free(v->value.array.items);
         case VK_FUNCTION:
             // TODO: Fix double free when we have a function that has itself in one of the parameters:
             // (eval
@@ -897,9 +910,10 @@ bool value_to_bool(Value v) {
         return v.value.integer != 0;
     case VK_STRING:
         return v.value.string.count != 0;
+    case VK_ARRAY:
     case VK_FUNCTION:
     case VK_NATIVE_FUNCTION:
-        PANIC("Cannot convert function to BOOL");
+        PANIC("Cannot convert %s to BOOL", vk_names[v.kind]);
     case __VK_LENGTH: PANIC("unreachable");
     }
     PANIC("unreachable");
@@ -926,6 +940,15 @@ char *value_to_string(Value value) {
             char buf[256];
             snprintf(buf, 256, "<native function '%s'>", value.value.native.name);
             return strdup(buf);
+        }
+        case VK_ARRAY: {
+            String s = new_string("(@");
+            for (size_t i = 0; i < value.value.array.count; ++i) {
+                extend_string(&s, new_string(" "));
+                extend_string(&s, new_string(value_to_string(value.value.array.items[i])));
+            }
+            extend_string(&s, new_string(")"));
+            return strdup(s.items);
         }
         case VK_UNIT:
             return "()";
@@ -1094,6 +1117,7 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 case TK_FUNCTION:
                 case TK_LET:
                 case TK_EQUALS:
+                case TK_AT:
                 case __TK_LENGTH:
                     PANIC("unreachable: %s", token_string(ast.value.atom));
                 case TK_INT:
@@ -1142,6 +1166,19 @@ Value eval_in_scope(AST ast, EvalScope *scope) {
                 case __TK_LENGTH:
                     PANIC("unreachable");
 
+                case TK_AT: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    Value ret = {
+                        .kind = VK_ARRAY,
+                        .value = {
+                            .array = { 0 },
+                        },
+                    };
+                    for (size_t i = 0; i < fn.args.count; ++i) {
+                        da_append(&ret.value.array, eval(fn.args.items[i], scope));
+                    }
+                    return ret;
+                } break;
                 case TK_EVAL: {
                     FunctionCallValue fn = ast.value.fn_call;
                     if (fn.args.count < 1) PANIC("Eval operation must have at least on expression");
