@@ -57,20 +57,23 @@ keywords that were highlighted.
 
 ## User Functions
 
+All user functions are anonymous.  To be able to call them, they must be
+assigned to a variable.
+
 ```lisp
-(function name param1 param2 ... body)
+(let foo (function param1 param2 body))
 ```
 
 Example:
 
 ```lisp
 (eval
-    (function foo x (
+    (let foo (function x (
         if (- 5 x) (eval
             (println x)
             (foo (+ x 1))
         )
-    ))
+    )))
     (foo 0)
 )
 ```
