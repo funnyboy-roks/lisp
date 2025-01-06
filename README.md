@@ -13,7 +13,7 @@ keywords that were highlighted.
 (eval
     (print "What is your age?\nAge: ")
     (let x (parseint (readline)))
-    (println "I think you are" x (if (- x 1) "years" "year") "old.")
+    (println "You were born" x (if (!= x 1) "years" "year") "ago.")
 )
 ```
 
