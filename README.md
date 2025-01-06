@@ -29,6 +29,9 @@ keywords that were highlighted.
 - `println` - `print` with trailing newline
 - `parseint` - parse string to int
 - `readline` - read one line from stdin
+- `append` - append value to array (returns new array)
+- `length` - get length of array or string
+- `int`, `char`, `string`, `bool` - cast value to given type
 
 ## Operations
 
@@ -36,6 +39,12 @@ keywords that were highlighted.
 - `+` - Add numbers / Concat strings `(+ 1 2 "hello" true)` -> `3hellotrue`
 - `*` - Multiply `(* 2 3 4)` -> `24`
 - `/` - Divide `(/ 10 5)` -> `2`
+- `@` - Create array `(@ 1 2 3)`
+- `==` - Equals
+- `!=` - Not Equals
+- `<`, `<=` - Less than, less than or equal to
+- `>`, `>=` - Greater than, greater than or equal to
+- `.` - Index into array or string `(. "hello" 0)` -> `'h'`
 
 ## Variables
 
@@ -48,9 +57,11 @@ keywords that were highlighted.
 
 ## User Functions
 
-- `(function name param1 param2 ... (body))`
+```lisp
+(function name param1 param2 ... body)
+```
 
-### Example
+Example:
 
 ```lisp
 (eval
@@ -70,4 +81,36 @@ keywords that were highlighted.
 (if condition (then))
 ; and
 (if condition (then) (else))
+```
+
+## Loops
+
+While Loops: 
+
+```lisp
+(while condition body)
+```
+
+Example:
+
+```lisp
+(let i 0)
+(while (< i (length a)) (eval
+    (println (+ "a[" i "] =") (. a i))
+    (= i (+ i 1))
+))
+```
+
+For Loops: 
+
+```lisp
+(for init condition post body)
+```
+
+Example:
+
+```lisp
+(for (let i 0) (< i (length a)) (= i (+ i 1)) (eval
+    (println (+ "a[" i "] =") (. a i))
+))
 ```

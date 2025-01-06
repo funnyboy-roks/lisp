@@ -1,6 +1,6 @@
 (eval
     (function foo x (
-        if (- 5 x) (eval
+        if (< x 5) (eval
             (println x)
             (foo (+ x 1))
         )

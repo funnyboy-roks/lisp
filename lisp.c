@@ -1746,8 +1746,9 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
                             Value *v = add_var(&fn_ctx, fndef.params.items[i]);
                             *v = eval(fn.args.items[i], ctx);
                         }
-                        eval_in_ctx(*fndef.body, &fn_ctx);
+                        Value ret = eval_in_ctx(*fndef.body, &fn_ctx);
                         free_ctx(fn_ctx);
+                        return ret;
                     } else if (var->kind == VK_NATIVE_FUNCTION) {
                         NativeFunctionValue fndef = var->value.native;
 
@@ -1840,7 +1841,7 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
             return *var = eval(*ass.value, ctx);
         } break;
     }
-    PANIC("Unkonwn expression kind: '%s'", ek_names[ast.kind]);
+    PANIC("Unknown expression kind: '%s'", ek_names[ast.kind]);
 }
 
 Value eval(AST ast, EvalContext *parent_ctx) {
