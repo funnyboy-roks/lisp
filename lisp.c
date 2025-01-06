@@ -573,7 +573,6 @@ typedef struct {
 } ParamList;
 
 typedef struct {
-    const char *name;
     ParamList params;
     AST *body;
 } FunctionDefValue;
@@ -724,12 +723,6 @@ AST parse_cond(FILE *file) {
 }
 
 AST parse_function_def(FILE *file) {
-
-    Token name;
-    if (!take_token_if(file, TK_IDENT, &name)) {
-        ERROR("Expected name for function, got %s", token_string(*peek_token(file)));
-    }
-
     ParamList params = { 0 };
 
     Token param;
@@ -748,7 +741,6 @@ AST parse_function_def(FILE *file) {
         .kind = EK_FUNCTION_DEF,
         .value = {
             .fn_def = {
-                .name = name.value.ident,
                 .params = params,
                 .body = bodyp
             }
@@ -991,8 +983,6 @@ void print_ast(AST *ast, size_t depth) {
             FunctionDefValue fn = ast->value.fn_def;
             printf("FunctionDef {\n");
             printf("%*s", prefix + 4, "");
-            printf("name: %s\n", fn.name);
-            printf("%*s", prefix + 4, "");
             printf("params: ");
             for (size_t i = 0; i < fn.params.count; ++i) {
                 if (i != 0) printf(" ");
@@ -1198,7 +1188,7 @@ char *value_to_string(Value value) {
             return value.value.integer ? "true" : "false";
         case VK_FUNCTION: {
             char buf[256];
-            snprintf(buf, 256, "<function '%s'>", value.value.fn.name);
+            snprintf(buf, 256, "<anonymous function>");
             return strdup(buf);
         }
         case VK_NATIVE_FUNCTION: {
@@ -1442,6 +1432,42 @@ Ordering compare_values(Value a, Value b) {
 }
 
 Value eval(AST ast, EvalContext *ctx);
+Value eval_in_ctx(AST ast, EvalContext *ctx);
+
+Value apply_fn(EvalContext *ctx, const char *name, Value fn, size_t argc, Value *argv) {
+    assert(fn.kind == VK_FUNCTION || fn.kind == VK_NATIVE_FUNCTION);
+    if (fn.kind == VK_FUNCTION) {
+        FunctionDefValue fndef = fn.value.fn;
+
+        if (argc != fndef.params.count)
+            PANIC("Function '%s' expected %ld params, received %ld.", name, fndef.params.count, argc);
+
+        EvalContext fn_ctx = create_ctx(ctx);
+        for (size_t i = 0; i < fndef.params.count; ++i) {
+            Value *v = add_var(&fn_ctx, fndef.params.items[i]);
+            *v = argv[i];
+        }
+        Value ret = eval_in_ctx(*fndef.body, &fn_ctx);
+        free_ctx(fn_ctx);
+        return ret;
+    } else {
+        NativeFunctionValue fndef = fn.value.native;
+
+        const char *reason = check_range(argc, fndef.min_args, fndef.max_args);
+
+        if (reason) {
+            if (fndef.min_args == fndef.max_args)
+                PANIC("%s arguments passed to function '%s'.  Expected %ld, got %ld", reason, fndef.name, fndef.min_args, argc);
+            if (fndef.min_args <= 0)
+                PANIC("%s arguments passed to function '%s'.  Expected at most %ld, got %ld", reason, fndef.name, fndef.max_args, argc);
+            if (fndef.max_args < 0)
+                PANIC("%s arguments passed to function '%s'.  Expected at least %ld, got %ld", reason, fndef.name, fndef.min_args, argc);
+        }
+
+        return fndef.fn(ctx, argc, argv);
+    }
+}
+
 Value eval_in_ctx(AST ast, EvalContext *ctx) {
     switch (ast.kind) {
         case __EK_LENGTH: PANIC("unreachable");
@@ -1735,44 +1761,15 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
                     Value *var = get_var(ctx, name);
                     if (var == NULL) {
                         PANIC("Unknown function '%s'", name);
-                    } else if (var->kind == VK_FUNCTION) {
-                        FunctionDefValue fndef = var->value.fn;
-
-                        if (fn.args.count != fndef.params.count)
-                            PANIC("Function '%s' expected %ld params, received %ld.", name, fndef.params.count, fn.args.count);
-                        
-                        EvalContext fn_ctx = create_ctx(ctx);
-                        for (size_t i = 0; i < fndef.params.count; ++i) {
-                            Value *v = add_var(&fn_ctx, fndef.params.items[i]);
-                            *v = eval(fn.args.items[i], ctx);
-                        }
-                        Value ret = eval_in_ctx(*fndef.body, &fn_ctx);
-                        free_ctx(fn_ctx);
-                        return ret;
-                    } else if (var->kind == VK_NATIVE_FUNCTION) {
-                        NativeFunctionValue fndef = var->value.native;
-
-                        const char *reason = check_range(fn.args.count, fndef.min_args, fndef.max_args);
-
-                        if (reason) {
-                            if (fndef.min_args == fndef.max_args)
-                                PANIC("%s arguments passed to function '%s'.  Expected %ld, got %ld", reason, fndef.name, fndef.min_args, fn.args.count);
-                            if (fndef.min_args <= 0)
-                                PANIC("%s arguments passed to function '%s'.  Expected at most %ld, got %ld", reason, fndef.name, fndef.max_args, fn.args.count);
-                            if (fndef.max_args < 0)
-                                PANIC("%s arguments passed to function '%s'.  Expected at least %ld, got %ld", reason, fndef.name, fndef.min_args, fn.args.count);
-                        }
-
-                        Value argv[fn.args.count];
-
-                        for (size_t i = 0; i < fn.args.count; ++i) {
-                            argv[i] = eval(fn.args.items[i], ctx);
-                        }
-
-                        return fndef.fn(ctx, fn.args.count, argv);
-                    } else {
+                    }
+                    if (var->kind != VK_FUNCTION && var->kind != VK_NATIVE_FUNCTION) {
                         PANIC("Variable '%s' is not a function.", name);
                     }
+                    Value args[fn.args.count];
+                    for (size_t i = 0; i < fn.args.count; ++i) {
+                        args[i] = eval(fn.args.items[i], ctx);
+                    }
+                    return apply_fn(ctx, name, *var, fn.args.count, args);
                 } break;
             }
         } break;
@@ -1815,11 +1812,10 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
             return (Value) { 0 };
         } break;
         case EK_FUNCTION_DEF: {
-            FunctionDefValue fn = ast.value.fn_def;
-            Value *var = add_var(ctx->parent, fn.name);
-            var->kind = VK_FUNCTION;
-            var->value.fn = fn;
-            return (Value) { 0 };
+            return (Value) {
+                .kind = VK_FUNCTION,
+                .value.fn = ast.value.fn_def,
+            };
         } break;
         case EK_DECLARE_VAR: {
             DeclareAssign dec = ast.value.declare_assign;
@@ -1875,9 +1871,7 @@ Value native_parseint(EvalContext *ctx, size_t argc, Value *argv) {
     int value = atoi(arg.value.string.items);
     return (Value) {
         .kind = VK_INT,
-        .value = {
-            .integer = value,
-        }
+        .value.integer = value,
     };
 }
 
@@ -1890,11 +1884,9 @@ Value native_readline(EvalContext *ctx, size_t argc, Value *_argv) {
     line[--r] = '\0'; // remove newline
     return (Value) {
         .kind = VK_STRING,
-        .value = {
-            .string = {
-                .items = line,
-                .count = r,
-            }
+        .value.string = {
+            .items = line,
+            .count = r,
         }
     };
 }
@@ -1910,9 +1902,7 @@ Value native_append(EvalContext *ctx, size_t argc, Value *argv) {
     va.count += argc - 1;
     return (Value) {
         .kind = VK_ARRAY,
-        .value = {
-            .array = va
-        }
+        .value.array = va
     };
 }
 
@@ -1938,9 +1928,7 @@ Value native_length(EvalContext *ctx, size_t argc, Value *argv) {
     }
     return (Value) {
         .kind = VK_INT,
-        .value = {
-            .integer = n
-        }
+        .value.integer = n
     };
 }
 
@@ -1955,9 +1943,7 @@ Value native_string(EvalContext *ctx, size_t argc, Value *argv) {
     assert(argc == 1);
     return (Value) {
         .kind = VK_STRING,
-        .value = {
-            .string = new_string(value_to_string(argv[0]))
-        }
+        .value.string = new_string(value_to_string(argv[0]))
     };
 }
 
@@ -1973,6 +1959,27 @@ Value native_bool(EvalContext *ctx, size_t argc, Value *argv) {
     Value v = argv[0];
     if (!coerce(&v, VK_BOOL)) PANIC("Cannot cast type %s to BOOL.", vk_names[v.kind]);
     return v;
+}
+
+Value native_map(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc == 2);
+    Value varray = argv[0];
+    if (varray.kind != VK_ARRAY) PANIC("Argument one of append must be an array");
+    ValueArray array = varray.value.array;
+    Value mapper = argv[1];
+    if (mapper.kind != VK_FUNCTION && mapper.kind != VK_NATIVE_FUNCTION) PANIC("Mapper must be a function");
+    ValueArray out = { 0 };
+    out.items = malloc(sizeof(Value) * (out.capacity = array.count));
+
+    for (size_t i = 0; i < array.count; ++i) {
+        out.items[i] = apply_fn(ctx, "mapper", mapper, 1, &array.items[i]);
+    }
+    out.count = array.count;
+
+    return (Value) {
+        .kind = VK_ARRAY,
+        .value.array = out,
+    };
 }
 
 #define ADD_FN(fn_name, native_fn, min_argc, max_argc) \
@@ -1998,6 +2005,7 @@ EvalContext create_global_ctx() {
 
     ADD_FN(append, native_append, 2, -1);
     ADD_FN(length, native_length, 1, 1);
+    ADD_FN(map, native_map, 2, 2);
 
     ADD_FN(int, native_int, 1, 1);
     ADD_FN(char, native_char, 1, 1);
