@@ -1837,8 +1837,7 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
             if (var->immutable) {
                 PANIC("Variable '%s' is immutable.", ass.name);
             }
-            *var = eval(*ass.value, ctx);
-            return (Value) { 0 };
+            return *var = eval(*ass.value, ctx);
         } break;
     }
     PANIC("Unkonwn expression kind: '%s'", ek_names[ast.kind]);
