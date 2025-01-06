@@ -58,6 +58,15 @@ typedef enum {
     TK_SLASH,
     TK_EQUALS,
     TK_AT,
+    TK_DOT,
+
+    TK_DEQ, // ==
+    TK_BANG, // !
+    TK_NEQ, // !=
+    TK_LT, // <
+    TK_LEQ, // <=
+    TK_GT, // >
+    TK_GEQ, // >=
 
     // keywords
     TK_LET,
@@ -274,14 +283,58 @@ Token next_token(FILE *file)
             case '*': return (Token) {
                 .kind = TK_STAR,
             };
-            case '=': return (Token) {
-                .kind = TK_EQUALS,
-            };
+            case '!': {
+                if (fpeek(file) == '=') {
+                    ftake(file);
+                    return (Token) {
+                        .kind = TK_NEQ,
+                    };
+                }
+                return (Token) {
+                    .kind = TK_BANG,
+                };
+            } break;
+            case '<': {
+                if (fpeek(file) == '=') {
+                    ftake(file);
+                    return (Token) {
+                        .kind = TK_LEQ,
+                    };
+                }
+                return (Token) {
+                    .kind = TK_LT,
+                };
+            } break;
+            case '>': {
+                if (fpeek(file) == '=') {
+                    ftake(file);
+                    return (Token) {
+                        .kind = TK_GEQ,
+                    };
+                }
+                return (Token) {
+                    .kind = TK_GT,
+                };
+            } break;
+            case '=': {
+                if (fpeek(file) == '=') {
+                    ftake(file);
+                    return (Token) {
+                        .kind = TK_DEQ,
+                    };
+                }
+                return (Token) {
+                    .kind = TK_EQUALS,
+                };
+            } break;
             case '/': return (Token) {
                 .kind = TK_SLASH,
             };
             case '@': return (Token) {
                 .kind = TK_AT,
+            };
+            case '.': return (Token) {
+                .kind = TK_DOT,
             };
             case '-': {
                 int nc = fpeek(file);
@@ -290,9 +343,9 @@ Token next_token(FILE *file)
                     int n = take_int(file, nc);
                     return (Token) {
                         .kind = TK_INT,
-                        .value = {
-                            .integer = -n,
-                        }
+                            .value = {
+                                .integer = -n,
+                            }
                     };
                 }
                 return (Token) {
@@ -304,9 +357,9 @@ Token next_token(FILE *file)
                 String string = take_string(file, c);
                 return (Token) {
                     .kind = TK_STRING,
-                    .value = {
-                        .string = string,
-                    }
+                        .value = {
+                            .string = string,
+                        }
                 };
             } break;
             case ';': {
@@ -356,6 +409,7 @@ const char *tk_names[] = {
     [TK_SLASH] = "SLASH",
     [TK_EQUALS] = "EQUALS",
     [TK_AT] = "AT",
+    [TK_DOT] = "DOT",
 
     [TK_LET] = "LET",
     [TK_IF] = "IF",
@@ -405,6 +459,31 @@ const char *token_string(Token tok)
         break;
     case TK_AT:
         n += snprintf(sbuf + n, SBUF_LEN - n, " '@'");
+        break;
+    case TK_DOT:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '.'");
+        break;
+
+    case TK_DEQ:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '=='");
+        break;
+    case TK_BANG:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '!'");
+        break;
+    case TK_NEQ:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '!='");
+        break;
+    case TK_LT:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '<'");
+        break;
+    case TK_GT:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '>'");
+        break;
+    case TK_LEQ:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '<='");
+        break;
+    case TK_GEQ:
+        n += snprintf(sbuf + n, SBUF_LEN - n, " '>='");
         break;
 
     case TK_LET:
@@ -591,6 +670,14 @@ bool is_function_token(TokenKind kind) {
     case TK_IDENT:
     case TK_EVAL:
     case TK_AT:
+    case TK_DOT:
+    case TK_DEQ:
+    case TK_NEQ:
+    case TK_LT:
+    case TK_GT:
+    case TK_LEQ:
+    case TK_GEQ:
+    case TK_BANG:
         return true;
     case __TK_LENGTH:
         PANIC("unreachable");
@@ -841,6 +928,14 @@ bool is_expression_start(TokenKind tk) {
         case TK_FUNCTION:
         case TK_WHILE:
         case TK_FOR:
+        case TK_DOT:
+        case TK_DEQ:
+        case TK_NEQ:
+        case TK_LT:
+        case TK_GT:
+        case TK_LEQ:
+        case TK_GEQ:
+        case TK_BANG:
         case __TK_LENGTH:
             return false;
     }
@@ -985,6 +1080,7 @@ void print_ast(AST *ast, size_t depth) {
 typedef enum {
     VK_UNIT = 0,
     VK_INT,
+    VK_CHAR,
     VK_STRING,
     VK_BOOL,
     VK_FUNCTION,
@@ -996,6 +1092,7 @@ typedef enum {
 const char *vk_names[] = {
     [VK_UNIT] = "UNIT",
     [VK_INT] = "INT",
+    [VK_CHAR] = "CHAR",
     [VK_STRING] = "STRING",
     [VK_BOOL] = "BOOL",
     [VK_FUNCTION] = "FUNCTION",
@@ -1010,7 +1107,8 @@ typedef struct EvalContext EvalContext;
 
 typedef struct {
     const char *name;
-    size_t expected_args;
+    ssize_t min_args;
+    ssize_t max_args;
     Value (*fn)(EvalContext *ctx, size_t argc, Value *argv);
 } NativeFunctionValue;
 
@@ -1022,6 +1120,7 @@ typedef struct {
 
 typedef union {
     int integer;
+    char character;
     String string;
     FunctionDefValue fn;
     NativeFunctionValue native;
@@ -1038,12 +1137,12 @@ void free_value(Value *v) {
     switch (v->kind) {
         case VK_UNIT:
         case VK_INT:
+        case VK_CHAR:
         case VK_BOOL:
         case VK_NATIVE_FUNCTION:
         case __VK_LENGTH:
             break;
         case VK_STRING:
-            free((void *)v->value.string.items);
         case VK_ARRAY:
             for (size_t i = 0; i < v->value.array.count; ++i) {
                 free_value(&v->value.array.items[i]);
@@ -1065,6 +1164,7 @@ bool value_to_bool(Value v) {
     case VK_UNIT:
         return false;
     case VK_INT:
+    case VK_CHAR:
     case VK_BOOL:
         return v.value.integer != 0;
     case VK_STRING:
@@ -1081,6 +1181,12 @@ bool value_to_bool(Value v) {
 char *value_to_string(Value value) {
     switch (value.kind) {
         case __VK_LENGTH: PANIC("unreachable");
+        case VK_CHAR: {
+            char *str = malloc(2);
+            str[0] = value.value.character;
+            str[1] = '\0';
+            return str;
+        }
         case VK_INT: {
             char buf[20];
             snprintf(buf, 20, "%d", value.value.integer);
@@ -1130,9 +1236,18 @@ bool coerce(Value *value, ValueKind vk) {
             return false;
         case VK_ARRAY:
             return false;
+        case VK_CHAR: {
+            if (value->kind != VK_INT) return false;
+            int n = value->value.integer;
+            value->kind = VK_CHAR;
+            value->value.character = (char) n;
+            return true;
+        } break;
         case VK_INT:
             switch (value->kind) {
                 case VK_INT: return true;
+                case VK_CHAR: 
+                    value->value.integer = value->value.character;
                 case VK_BOOL: 
                     value->kind = vk;
                     return true;
@@ -1265,6 +1380,67 @@ Value *get_var(EvalContext *ctx, const char *name) {
     return get_var(ctx->parent, name);
 }
 
+// (inclusive)
+const char *check_range(size_t x, ssize_t min, ssize_t max) {
+    if (min > 0 && x < min) return "Not enough";
+    if (max >= 0 && x > max) return "Too many";
+    return NULL;
+}
+
+typedef enum {
+    ORD_EQ = 0, // a == b
+    ORD_LESS, // a < b
+    ORD_GREATER, // a > b
+    ORD_NEQ, // a != b (and doesn't make sense to have a < b or a > b)
+    ORD_NONE, // no relation
+} Ordering;
+
+Ordering ord_from_int(int cmp) {
+    if (cmp < 0) return ORD_LESS;
+    if (cmp > 0) return ORD_GREATER;
+    return ORD_EQ;
+}
+
+Ordering compare_values(Value a, Value b) {
+    // TODO: Subtyping
+    if (a.kind != b.kind) return ORD_NONE;
+
+    switch (a.kind) {
+        case VK_UNIT:
+            return ORD_EQ;
+        case VK_INT:
+            // https://stackoverflow.com/questions/10996418/efficient-integer-compare-function#10997428
+            return ord_from_int((a.value.integer > b.value.integer) - (a.value.integer < b.value.integer));
+        case VK_CHAR:
+            return ord_from_int(a.value.character - b.value.character);
+        case VK_ARRAY:
+            if (a.value.array.count < b.value.array.count) return ORD_LESS; 
+            if (a.value.array.count > b.value.array.count) return ORD_GREATER; 
+            for (size_t i = 0; i < a.value.array.count; ++i) {
+                Value ai = a.value.array.items[i];
+                Value bi = b.value.array.items[i];
+                Ordering cmp = compare_values(ai, bi);
+                if (cmp == ORD_EQ) continue;
+                return cmp;
+            }
+            return ORD_EQ;
+        case VK_STRING:
+            if (a.value.string.count < b.value.string.count) return ORD_LESS; 
+            if (a.value.string.count > b.value.string.count) return ORD_GREATER; 
+            int cmp = strncmp(a.value.string.items, b.value.string.items, a.value.string.count);
+            return ord_from_int(cmp);
+        case VK_BOOL:
+            if (!!a.value.integer == !!b.value.integer) return ORD_EQ;
+            return ORD_NEQ;
+        case VK_FUNCTION:
+            return ORD_NONE;
+        case VK_NATIVE_FUNCTION:
+            return ORD_NONE;
+        case __VK_LENGTH:
+            PANIC("unreachable");
+    }
+}
+
 Value eval(AST ast, EvalContext *ctx);
 Value eval_in_ctx(AST ast, EvalContext *ctx) {
     switch (ast.kind) {
@@ -1286,6 +1462,14 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
                 case TK_AT:
                 case TK_WHILE:
                 case TK_FOR:
+                case TK_DEQ:
+                case TK_NEQ:
+                case TK_LT:
+                case TK_GT:
+                case TK_LEQ:
+                case TK_GEQ:
+                case TK_DOT:
+                case TK_BANG:
                 case __TK_LENGTH:
                     PANIC("unreachable: %s", token_string(ast.value.atom));
                 case TK_INT:
@@ -1297,7 +1481,7 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
                     };
                 case TK_IDENT: {
                     Value *var = get_var(ctx, ast.value.atom.value.ident);
-                    if (!var) PANIC("Variable '%s' does not exist in current ctx.", ast.value.atom.value.ident);
+                    if (!var) PANIC("Variable '%s' does not exist in current scope.", ast.value.atom.value.ident);
                     return *var;
                 } break;
                 case TK_TRUE:
@@ -1337,6 +1521,151 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
                 case __TK_LENGTH:
                     PANIC("unreachable");
 
+                case TK_BANG: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 1) {
+                        PANIC("Expected one arguments to !, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    if (!coerce(&arg0, VK_BOOL)) PANIC("Cannot convert type %s to BOOL", vk_names[arg0.kind]);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = !arg0.value.integer,
+                        }
+                    };
+                } break;
+                case TK_DEQ: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    if (!coerce(&arg1, arg0.kind)) PANIC("Cannot compare type %s to type %s", vk_names[arg1.kind], vk_names[arg0.kind]);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = !compare_values(arg0, arg1),
+                        }
+                    };
+                } break;
+                case TK_NEQ: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    if (!coerce(&arg1, arg0.kind)) PANIC("Cannot compare type %s to type %s", vk_names[arg1.kind], vk_names[arg0.kind]);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = compare_values(arg0, arg1), // EQ is 0, everything else is nonzero
+                        }
+                    };
+                } break;
+                case TK_LT: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    if (!coerce(&arg1, arg0.kind)) PANIC("Cannot compare type %s to type %s", vk_names[arg1.kind], vk_names[arg0.kind]);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = compare_values(arg0, arg1) == ORD_LESS,
+                        }
+                    };
+                } break;
+                case TK_GT: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    if (!coerce(&arg1, arg0.kind)) PANIC("Cannot compare type %s to type %s", vk_names[arg1.kind], vk_names[arg0.kind]);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = compare_values(arg0, arg1) == ORD_GREATER,
+                        }
+                    };
+                } break;
+                case TK_LEQ: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    if (!coerce(&arg1, arg0.kind)) PANIC("Cannot compare type %s to type %s", vk_names[arg1.kind], vk_names[arg0.kind]);
+                    Ordering ord = compare_values(arg0, arg1);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = ord == ORD_LESS || ord == ORD_EQ,
+                        }
+                    };
+                } break;
+                case TK_GEQ: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    if (!coerce(&arg1, arg0.kind)) PANIC("Cannot compare type %s to type %s", vk_names[arg1.kind], vk_names[arg0.kind]);
+                    Ordering ord = compare_values(arg0, arg1);
+                    return (Value) {
+                        .kind = VK_BOOL,
+                        .value = {
+                            .integer = ord == ORD_GREATER || ord == ORD_EQ,
+                        }
+                    };
+                } break;
+
+                case TK_DOT: {
+                    FunctionCallValue fn = ast.value.fn_call;
+                    if (fn.args.count != 2) {
+                        PANIC("Expected two arguments, got %ld", fn.args.count);
+                    }
+                    Value arg0 = eval(fn.args.items[0], ctx);
+                    Value arg1 = eval(fn.args.items[1], ctx);
+                    switch (arg0.kind) {
+                        case VK_UNIT:
+                        case VK_INT:
+                        case VK_BOOL:
+                        case VK_FUNCTION:
+                        case VK_CHAR:
+                        case VK_NATIVE_FUNCTION:
+                            PANIC("Cannot index into %s", vk_names[arg0.kind]);
+                        case VK_STRING: {
+                            String string = arg0.value.string;
+                            if (arg1.kind != VK_INT) PANIC("Cannot index into %s with type %s", vk_names[arg0.kind], vk_names[arg1.kind]);
+                            int n = arg1.value.integer;
+                            if (n < 0 || n > string.count) PANIC("Index %d out of bounds for length %ld", n, string.count);
+                            return (Value) {
+                                .kind = VK_CHAR,
+                                .value = {
+                                    .character = string.items[n],
+                                },
+                            };
+                        } break;
+                        case VK_ARRAY: {
+                            ValueArray array = arg0.value.array;
+                            if (arg1.kind != VK_INT) PANIC("Cannot index into %s with type %s", vk_names[arg0.kind], vk_names[arg1.kind]);
+                            int n = arg1.value.integer;
+                            if (n < 0 || n > array.count) PANIC("Index %d out of bounds for length %ld", n, array.count);
+                            return array.items[n];
+                        } break;
+                        case __VK_LENGTH:
+                            break;
+                    }
+                } break;
                 case TK_AT: {
                     FunctionCallValue fn = ast.value.fn_call;
                     Value ret = {
@@ -1422,8 +1751,16 @@ Value eval_in_ctx(AST ast, EvalContext *ctx) {
                     } else if (var->kind == VK_NATIVE_FUNCTION) {
                         NativeFunctionValue fndef = var->value.native;
 
-                        if (fndef.expected_args != -1 && fn.args.count != fndef.expected_args)
-                            PANIC("Function '%s' expected %ld params, received %ld.", name, fndef.expected_args, fn.args.count);
+                        const char *reason = check_range(fn.args.count, fndef.min_args, fndef.max_args);
+
+                        if (reason) {
+                            if (fndef.min_args == fndef.max_args)
+                                PANIC("%s arguments passed to function '%s'.  Expected %ld, got %ld", reason, fndef.name, fndef.min_args, fn.args.count);
+                            if (fndef.min_args <= 0)
+                                PANIC("%s arguments passed to function '%s'.  Expected at most %ld, got %ld", reason, fndef.name, fndef.max_args, fn.args.count);
+                            if (fndef.max_args < 0)
+                                PANIC("%s arguments passed to function '%s'.  Expected at least %ld, got %ld", reason, fndef.name, fndef.min_args, fn.args.count);
+                        }
 
                         Value argv[fn.args.count];
 
@@ -1562,13 +1899,90 @@ Value native_readline(EvalContext *ctx, size_t argc, Value *_argv) {
     };
 }
 
-#define ADD_FN(fn_name, native_fn, argc) \
+Value native_append(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc >= 2);
+    if (argv[0].kind != VK_ARRAY) PANIC("Argument one of append must be an array");
+    ValueArray va = argv[0].value.array;
+    va.capacity = va.count + argc - 1;
+    Value *new_items = malloc(sizeof(Value) * va.capacity);
+    va.items = va.count == 0 ? new_items : memcpy(new_items, va.items, sizeof(Value) * va.count);
+    memcpy(va.items + va.count, argv + 1, sizeof(Value) * (argc - 1));
+    va.count += argc - 1;
+    return (Value) {
+        .kind = VK_ARRAY,
+        .value = {
+            .array = va
+        }
+    };
+}
+
+Value native_length(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc == 1);
+    int n;
+    switch (argv[0].kind) {
+        case VK_STRING:
+            n = argv[0].value.string.count;
+            break;
+        case VK_ARRAY:
+            n = argv[0].value.array.count;
+            break;
+        case VK_UNIT:
+        case VK_INT:
+        case VK_CHAR:
+        case VK_BOOL:
+        case VK_FUNCTION:
+        case VK_NATIVE_FUNCTION:
+        case __VK_LENGTH:
+            PANIC("Cannot get length of type %s.", vk_names[argv[0].kind]);
+            break;
+    }
+    return (Value) {
+        .kind = VK_INT,
+        .value = {
+            .integer = n
+        }
+    };
+}
+
+Value native_int(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc == 1);
+    Value v = argv[0];
+    if (!coerce(&v, VK_INT)) PANIC("Cannot cast type %s to INT.", vk_names[v.kind]);
+    return v;
+}
+
+Value native_string(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc == 1);
+    return (Value) {
+        .kind = VK_STRING,
+        .value = {
+            .string = new_string(value_to_string(argv[0]))
+        }
+    };
+}
+
+Value native_char(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc == 1);
+    Value v = argv[0];
+    if (!coerce(&v, VK_CHAR)) PANIC("Cannot cast type %s to CHAR.", vk_names[v.kind]);
+    return v;
+}
+
+Value native_bool(EvalContext *ctx, size_t argc, Value *argv) {
+    assert(argc == 1);
+    Value v = argv[0];
+    if (!coerce(&v, VK_BOOL)) PANIC("Cannot cast type %s to BOOL.", vk_names[v.kind]);
+    return v;
+}
+
+#define ADD_FN(fn_name, native_fn, min_argc, max_argc) \
     set_var(&ctx, #fn_name, (Value) {  \
         .kind = VK_NATIVE_FUNCTION,      \
         .value = {                       \
             .native = {                  \
                 .name = #fn_name,        \
-                .expected_args = argc,   \
+                .min_args = min_argc,   \
+                .max_args = max_argc,   \
                 .fn = native_fn,         \
             }                            \
         },                               \
@@ -1577,10 +1991,18 @@ Value native_readline(EvalContext *ctx, size_t argc, Value *_argv) {
 
 EvalContext create_global_ctx() {
     EvalContext ctx = create_ctx(NULL);
-    ADD_FN(print, native_print, -1);
-    ADD_FN(println, native_println, -1);
-    ADD_FN(parseint, native_parseint, 1);
-    ADD_FN(readline, native_readline, 0);
+    ADD_FN(print, native_print, -1, -1);
+    ADD_FN(println, native_println, -1, -1);
+    ADD_FN(parseint, native_parseint, 1, -1);
+    ADD_FN(readline, native_readline, 0, 0);
+
+    ADD_FN(append, native_append, 2, -1);
+    ADD_FN(length, native_length, 1, 1);
+
+    ADD_FN(int, native_int, 1, 1);
+    ADD_FN(char, native_char, 1, 1);
+    ADD_FN(string, native_string, 1, 1);
+    ADD_FN(bool, native_bool, 1, 1);
     return ctx;
 }
 

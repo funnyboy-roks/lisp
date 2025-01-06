@@ -1,11 +1,6 @@
 (eval
-    (let x 1)
-    (let cont true)
-    (for () cont (= x (+ x 1)) (eval
-        (println x)
-        (= cont (- 5 x))
-    ))
-    (println "done " x)
+    (let a (. "a" 0))
+    (println "(int a) =" (int a))
+    (println "(char (int a)) =" (char (int a)))
+    (println "(== a (char (int a))) =" (== a (char (int a))))
 )
-
-; for (init; condition; after) body
